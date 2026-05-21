@@ -1473,6 +1473,8 @@ class Channel(object):
                 # durable_req.flags = durable.durable_flags
                 if persistent is True:
                     durable_req.flags = smb2.SMB2_DHANDLE_FLAG_PERSISTENT | durable.durable_flags
+                else:
+                    durable_req.flags = durable.durable_flags
         elif durable is True:
             durable_req = smb2.DurableHandleRequest(create_req)
         elif durable is not False:

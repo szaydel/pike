@@ -1,6 +1,5 @@
 #
-# Copyright (c) 2020, Dell Inc. or its subsidiaries.
-# All rights reserved.
+# Copyright (c) Dell Inc. or its subsidiaries.  All rights reserved.
 # See file LICENSE for licensing information.
 #
 # Module Name:
@@ -684,6 +683,7 @@ class PikeTestSuite(unittest.TestSuite):
 class SambaPikeTestSuite(PikeTestSuite):
     skip_tests_reasons = {
         # ERROR
+        "test_durable_reconnect_v2_fails": "Samba does not enforce SHOULD requirement from MS-SMB2 3.3.5.9.12 for persistent flag validation",
         "test_resiliency_reconnect_after_timeout": "returns error against dperson/samba:d1a453d8123e462b0ad0ca8df51fb8ac0e5716b9",
         "test_resiliency_reconnect_before_timeout": "returns error against dperson/samba:d1a453d8123e462b0ad0ca8df51fb8ac0e5716b9",
         "test_resiliency_upgrade_reconnect_after_timeout": "returns error against dperson/samba:d1a453d8123e462b0ad0ca8df51fb8ac0e5716b9",
