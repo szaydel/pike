@@ -19,12 +19,14 @@ from builtins import map
 import array
 import random
 import time
+import unittest
 
 import pike.model
 import pike.smb2
 import pike.test
 import pike.ntstatus
 
+DELAY_TIME = 10
 
 # for buffer too small
 class InvalidNetworkResiliencyRequestRequest(pike.smb2.NetworkResiliencyRequestRequest):
@@ -69,6 +71,7 @@ class DurableHandleTest(pike.test.PikeTest):
             lease_key=lease_key,
             lease_state=lease,
             durable=durable,
+            persistent=False
         ).result()
 
     def durable_test(self, durable):
@@ -99,6 +102,76 @@ class DurableHandleTest(pike.test.PikeTest):
         self.assertEqual(handle2.lease.lease_state, self.rwh)
         self.assertTrue(handle2.is_durable)
         chan2.close(handle2)
+
+    # Persistent flag IS set in RECONNECT
+    # MS SMB Spec 3.3.5.9.12
+    # If Open.IsPersistent is FALSE and the SMB2_DHANDLE_FLAG_PERSISTENT bit
+    # is set in the Flags field of the SMB2_CREATE_DURABLE_HANDLE_RECONNECT_V2
+    # Create Context, the server SHOULD<349> fail the request with STATUS_INVALID_PARAMETER. 
+    def durable_reconnect_test_fails(self, durable):
+        chan, tree = self.tree_connect()
+
+        handle1 = self.create(chan, tree, durable=durable)
+
+        self.assertEqual(handle1.lease.lease_state, self.rwh)
+        self.assertTrue(handle1.is_durable)
+
+        # Close the connection
+        chan.connection.close()
+
+        chan2, tree2 = self.tree_connect()
+
+        with self.assert_error(pike.ntstatus.STATUS_INVALID_PARAMETER):
+            handle2 = chan2.create(
+                tree2,
+                "durable.txt",
+                access=pike.smb2.FILE_READ_DATA
+                | pike.smb2.FILE_WRITE_DATA
+                | pike.smb2.DELETE,
+                share=self.share_all,
+                disposition=pike.smb2.FILE_SUPERSEDE,
+                oplock_level=pike.smb2.SMB2_OPLOCK_LEVEL_LEASE,
+                lease_key=self.lease1,
+                lease_state=self.rwh,
+                durable=handle1,
+                persistent=True
+            ).result()
+
+    # RECONNECT (V1) sent for a non-durable Open.
+    # MS SMB Spec 3.3.5.9.12
+    # Open.IsDurable is FALSE and Open.IsResilient is FALSE or unimplemented. 
+    def durable_reconnect_without_durable_open(self, durable):
+        chan, tree = self.tree_connect()
+
+        handle1 = chan.create(
+            tree,
+            "non_durable.txt",
+            access=pike.smb2.FILE_READ_DATA
+            | pike.smb2.FILE_WRITE_DATA
+            | pike.smb2.DELETE,
+            share=self.share_all,
+            disposition=pike.smb2.FILE_SUPERSEDE
+        ).result()
+
+        self.assertFalse(handle1.is_durable)
+
+        # Close the connection
+        chan.connection.close()
+
+        chan2, tree2 = self.tree_connect()
+
+        with self.assert_error(pike.ntstatus.STATUS_OBJECT_NAME_NOT_FOUND):
+            handle2 = chan2.create(
+                tree2,
+                "non_durable.txt",
+                access=pike.smb2.FILE_READ_DATA
+                | pike.smb2.FILE_WRITE_DATA
+                | pike.smb2.DELETE,
+                share=self.share_all,
+                disposition=pike.smb2.FILE_SUPERSEDE,
+                durable=handle1,
+                persistent=0
+            ).result()
 
     def durable_reconnect_fails_client_guid_test(self, durable):
         chan, tree = self.tree_connect()
@@ -156,6 +229,39 @@ class DurableHandleTest(pike.test.PikeTest):
         # Reconnect should now fail
         with self.assert_error(pike.ntstatus.STATUS_OBJECT_NAME_NOT_FOUND):
             handle3 = self.create(chan3, tree3, durable=handle1)
+
+    def durable_timer_test(self, durable):
+        chan, tree = self.tree_connect()
+
+        handle1 = self.create(chan, tree, durable=durable)
+        self.assertEqual(handle1.lease.lease_state, self.rwh)
+        self.assertTrue(handle1.is_durable)
+
+        chan.connection.close()
+
+        # Convert durable timeout from milliseconds to seconds
+        timeout = handle1.durable_timeout/1000
+
+        if (DELAY_TIME >= timeout):
+             raise unittest.SkipTest("Durable timeout needs to be greater than 10 seconds. Skipping...")
+
+        time.sleep(DELAY_TIME)
+
+        chan2, tree2 = self.tree_connect()
+
+        # Request reconnect before max timeout
+        handle2 = self.create(chan2, tree2, durable=handle1)
+        self.assertEqual(handle2.lease.lease_state, self.rwh)
+        self.assertEqual(handle1.durable_timeout, handle2.durable_timeout)
+        chan2.connection.close()
+
+        time.sleep(timeout + DELAY_TIME)
+
+        # Request reconnect after max timeout
+        chan3, tree3 = self.tree_connect()
+
+        with self.assert_error(pike.ntstatus.STATUS_OBJECT_NAME_NOT_FOUND):
+            self.create(chan3, tree3, durable=handle1)
 
     @pike.test.RequireDialect(pike.smb2.DIALECT_SMB2_1)
     def test_resiliency_reconnect_before_timeout(self, durable=True):
@@ -316,6 +422,16 @@ class DurableHandleTest(pike.test.PikeTest):
     def test_durable_reconnect_v2(self):
         self.durable_reconnect_test(0)
 
+    # Reconnect a durable handle via V2 context structure
+    @pike.test.RequireDialect(pike.smb2.DIALECT_SMB3_0)
+    def test_durable_reconnect_v2_fails(self):
+        self.durable_reconnect_test_fails(0)
+
+    # Reconnect a durable handle via V2 context structure
+    @pike.test.RequireDialect(pike.smb2.DIALECT_SMB3_0)
+    def test_durable_reconnect_without_durable_open(self):
+        self.durable_reconnect_without_durable_open(0)
+
     # Reconnecting a durable handle (v2) after a TCP disconnect
     # fails with STATUS_OBJECT_NAME_NOT_FOUND if the client
     # guid does not match
@@ -329,3 +445,7 @@ class DurableHandleTest(pike.test.PikeTest):
     @pike.test.RequireDialect(pike.smb2.DIALECT_SMB3_0)
     def test_durable_v2_invalidate(self):
         self.durable_invalidate_test(0)
+
+    @pike.test.RequireDialect(pike.smb2.DIALECT_SMB3_0)
+    def test_durable_v2_timer(self):
+        self.durable_timer_test(0)
